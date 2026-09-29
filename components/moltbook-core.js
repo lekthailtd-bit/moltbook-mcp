@@ -293,6 +293,35 @@ function formatComments(comments, depth = 0, blocked = null) {
   return out;
 }
 
+async function fetchPostComments(postId) {
+  const comments = [];
+  const seenCursors = new Set();
+  let cursor = null;
+  let page = 0;
+
+  while (page < 20) {
+    const query = new URLSearchParams({ sort: "old", limit: "100" });
+    if (cursor) query.set("cursor", cursor);
+    const data = await moltFetch(`/posts/${postId}/comments?${query.toString()}`);
+    if (!data?.success) {
+      return { comments, error: data?.error || "Failed to fetch comments", truncated: false };
+    }
+    if (Array.isArray(data.comments)) comments.push(...data.comments);
+    page++;
+
+    if (!data.has_more || !data.next_cursor) {
+      return { comments, error: null, truncated: false };
+    }
+    if (seenCursors.has(data.next_cursor)) {
+      return { comments, error: "Comment pagination repeated a cursor", truncated: true };
+    }
+    seenCursors.add(data.next_cursor);
+    cursor = data.next_cursor;
+  }
+
+  return { comments, error: null, truncated: true };
+}
+
 // Export verification helpers for focused tests
 export { wordsToMath, extractVerification, evaluateChallenge };
 
@@ -359,9 +388,17 @@ export function register(server) {
     const trackingWarnings = [...checkInboundTracking(p.content), ...checkInboundTracking(p.title)];
     const trackingNote = trackingWarnings.length ? `\n⚠️ INBOUND: ${trackingWarnings.join(", ")}` : "";
     let text = `"${sanitize(p.title)}" by @${p.author?.name || "unknown"} in m/${p.submolt?.name || "unknown"}${stateLabel}\n${p.upvotes}↑ ${p.downvotes}↓ ${p.comment_count} comments\n\n${sanitize(p.content) || p.url || ""}${trackingNote}`;
-    if (data.comments?.length) {
-      text += "\n\n--- Comments ---\n";
-      text += formatComments(data.comments);
+    if ((p.comment_count ?? 0) > 0) {
+      const commentResult = await fetchPostComments(post_id);
+      if (commentResult.comments.length) {
+        text += "\n\n--- Comments ---\n";
+        text += formatComments(commentResult.comments);
+      }
+      if (commentResult.error) {
+        text += `\n\n[Comments partially unavailable: ${sanitize(commentResult.error)}]`;
+      } else if (commentResult.truncated) {
+        text += "\n\n[Comments truncated after 20 pages]";
+      }
     }
     return { content: [{ type: "text", text }] };
   });

@@ -121,14 +121,34 @@ describe('moltbook-core.js component', () => {
     // Mock fetch for API calls
     originalFetch = global.fetch;
     global.fetch = mock.fn(async (url, opts) => {
-      // Mock Moltbook API responses
-      if (url.includes('/posts/') && !opts?.method) {
+      // Mock current Moltbook API shape: post details and comments are separate endpoints.
+      if (url.includes('/posts/test-123/comments') && !opts?.method) {
+        const secondPage = url.includes('cursor=page-2');
+        return {
+          ok: true,
+          json: async () => secondPage ? ({
+            success: true,
+            comments: [{ id: 'comment-2', content: 'Second page comment', upvotes: 1, author: { name: 'bob' }, replies: [] }],
+            count: 2,
+            has_more: false
+          }) : ({
+            success: true,
+            comments: [{
+              id: 'comment-1', content: 'First page comment', upvotes: 2, author: { name: 'alice' },
+              replies: [{ id: 'reply-1', content: 'Nested reply', upvotes: 1, author: { name: 'carol' }, replies: [] }]
+            }],
+            count: 2,
+            has_more: true,
+            next_cursor: 'page-2'
+          })
+        };
+      }
+      if (url.includes('/posts/test-123') && !opts?.method) {
         return {
           ok: true,
           json: async () => ({
             success: true,
-            post: { id: 'test-123', title: 'Test Post', content: 'Test content', upvotes: 5, downvotes: 0, comment_count: 2, author: { name: 'testuser' }, submolt: { name: 'general' } },
-            comments: []
+            post: { id: 'test-123', title: 'Test Post', content: 'Test content', upvotes: 5, downvotes: 0, comment_count: 3, author: { name: 'testuser' }, submolt: { name: 'general' } }
           })
         };
       }
@@ -254,10 +274,13 @@ describe('moltbook-core.js component', () => {
   });
 
   describe('moltbook API tools (mocked)', () => {
-    test('moltbook_post fetches post with comments', async () => {
+    test('moltbook_post fetches paginated comments from the dedicated comments endpoint', async () => {
       const result = await server.callTool('moltbook_post', { post_id: 'test-123' });
       const text = getText(result);
-      assert.ok(text.includes('Test') || text.includes('error'), 'Should return post content or error');
+      assert.ok(text.includes('Test Post'), 'Should return post content');
+      assert.ok(text.includes('@alice') && text.includes('First page comment'), 'Should include first comment page');
+      assert.ok(text.includes('@carol') && text.includes('Nested reply'), 'Should include nested replies');
+      assert.ok(text.includes('@bob') && text.includes('Second page comment'), 'Should include later comment pages');
     });
 
     test('moltbook_search returns results structure', async () => {
