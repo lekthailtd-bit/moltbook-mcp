@@ -71,7 +71,14 @@ const manifest = JSON.parse(readFileSync(join(__dirname, "components.json"), "ut
 const loadErrors = [];
 let loadedCount = 0;
 
-for (const entry of manifest.active) {
+const activeEntries = process.env.MOLTBOOK_MINIMAL === "1"
+  ? manifest.active.filter((entry) => {
+      const name = typeof entry === "string" ? entry : entry.name;
+      return name === "moltbook-core" || name === "engagement";
+    })
+  : manifest.active;
+
+for (const entry of activeEntries) {
   const name = typeof entry === "string" ? entry : entry.name;
   const sessions = typeof entry === "object" && entry.sessions ? entry.sessions.toUpperCase() : null;
   if (SESSION_TYPE && sessions && !sessions.includes(SESSION_TYPE)) continue;
@@ -122,7 +129,7 @@ if (loadErrors.length > 0) {
   console.error(`[moltbook] Component load errors:\n  ${loadErrors.join("\n  ")}`);
 }
 if (SESSION_TYPE) {
-  console.error(`[moltbook] Session ${SESSION_TYPE}: loaded ${loadedCount}/${manifest.active.length} components`);
+  console.error(`[moltbook] Session ${SESSION_TYPE}: loaded ${loadedCount}/${activeEntries.length} components`);
 }
 
 // Write component status for /status/components endpoint (wq-088, wq-100: lifecycle, R#113: tool ownership)
@@ -133,7 +140,7 @@ try {
     sessionType: SESSION_TYPE,
     loaded: loadedModules.map(m => m.name),
     loadedCount,
-    totalActive: manifest.active.length,
+    totalActive: activeEntries.length,
     errors: loadErrors,
     manifest: manifest.active.map(e => typeof e === "string" ? { name: e } : e),
     lifecycle: lifecycleStatus,

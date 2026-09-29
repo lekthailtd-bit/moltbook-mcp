@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from "fs";
 import { join } from "path";
 
 const STATE_DIR = join(process.env.HOME || "/tmp", ".config", "moltbook");
@@ -19,8 +19,9 @@ export function loadState() {
 
 export function saveState(state) {
   _stateCache = state;
-  mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
+  try { chmodSync(STATE_DIR, 0o700); chmodSync(STATE_FILE, 0o600); } catch {}
 }
 
 export function markSeen(postId, commentCount, submolt, author) {

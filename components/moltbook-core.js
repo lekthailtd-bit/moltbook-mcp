@@ -32,8 +32,13 @@ function wordsToMath(text) {
     "raised to": "**", "to the power of": "**",
   };
 
-  // Normalize case and strip non-alphabetic/digit/space chars except operators
-  let normalized = text.toLowerCase().replace(/[^a-z0-9+\-*/().^ ]/g, " ").replace(/\s+/g, " ").trim();
+  // Rejoin punctuation-split letters before stripping the remaining noise.
+  let normalized = text
+    .toLowerCase()
+    .replace(/(?<=[a-z])[^a-z0-9\s](?=[a-z])/g, "")
+    .replace(/[^a-z0-9+\-*/().^ ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
   // Replace multi-word operators first
   for (const [phrase, op] of Object.entries(opWords)) {
@@ -61,8 +66,18 @@ function wordsToMath(text) {
     }
   }
 
+  const keywordKeys = [...Object.keys(numberWords), ...Object.keys(opWords).filter(k => !k.includes(" "))];
+
+  function normalizeKeywordToken(token) {
+    let t = token.replace(/(.)\1{2,}/g, "$1$1");
+    if (t in numberWords || t in opWords) return t;
+    const dedup = t.replace(/(.)\1+/g, "$1");
+    const matches = keywordKeys.filter(k => k.replace(/(.)\1+/g, "$1") === dedup);
+    return matches.length === 1 ? matches[0] : t;
+  }
+
   for (const token of tokens) {
-    const lc = token;
+    const lc = normalizeKeywordToken(token);
     if (lc in numberWords) {
       const val = numberWords[lc];
       if (val === 100 || val === 1000 || val === 1000000) {
@@ -119,7 +134,9 @@ function wordsToMath(text) {
       flushNumber();
       result.push(lc);
     } else {
-      // Unknown word — skip (e.g. "newtons", "what", "is")
+      // Unknown prose separates numeric phrases. Flush so a later number
+      // does not get merged into the previous one (e.g. "twenty three cm ... four").
+      flushNumber();
     }
   }
   flushNumber();
@@ -128,49 +145,116 @@ function wordsToMath(text) {
 }
 
 /**
- * Solve a Moltbook verification challenge.
- * When creating posts/comments, the API may return a verification_code + challenge
- * (a math expression). We evaluate the math and POST the answer to /api/v1/verify.
+ * Extract a verification challenge from Moltbook API responses.
+ * Current responses nest verification under post.verification/comment.verification,
+ * while older responses returned the fields at the top level.
+ */
+function extractVerification(data) {
+  if (!data) return null;
+  const verification =
+    data.verification ||
+    data.post?.verification ||
+    data.comment?.verification ||
+    data;
+
+  const code = verification?.verification_code;
+  const challenge =
+    verification?.challenge_text ||
+    verification?.challenge ||
+    verification?.math_challenge ||
+    verification?.question;
+
+  if (!code || !challenge) return null;
+  return { code, challenge };
+}
+
+/**
+ * Parse and solve the lightweight arithmetic challenges used by Moltbook.
+ * First prefer an explicit arithmetic expression produced by wordsToMath().
+ * If the challenge describes rate × time in prose (for example
+ * "23 cm per second for 4 seconds, how far?"), use a narrow semantic fallback.
+ */
+function evaluateChallenge(challenge) {
+  if (!challenge || typeof challenge !== "string") {
+    return { success: false, error: "Missing math challenge", challenge };
+  }
+
+  const preprocessed = wordsToMath(challenge);
+  const candidate = preprocessed.trim();
+  const numbers = (preprocessed.match(/\d+(?:\.\d+)?/g) || []).map(Number);
+  const normalized = challenge
+    .toLowerCase()
+    .replace(/(?<=[a-z])[^a-z0-9\s](?=[a-z])/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Moltbook inserts punctuation as obfuscation, so strong prose semantics win
+  // over operator-looking punctuation that may survive tokenization.
+  if (numbers.length >= 2) {
+    let answer = null;
+    let expression = null;
+    const [a, b] = numbers;
+    const asksDistance = /\b(how far|distance|travel|travels|traveled|travelled)\b/.test(normalized);
+    const hasRate = /\b(per second|per sec|each second|speed|velocity|rate)\b/.test(normalized);
+    const hasDuration = /\b(for|over)\b/.test(normalized) && /\b(seconds?|secs?|minutes?|mins?|hours?)\b/.test(normalized);
+
+    if (asksDistance && hasRate && hasDuration) {
+      answer = a * b;
+      expression = String(a) + " * " + String(b);
+    } else if (/\b(product|times|multiplied|multiply)\b/.test(normalized)) {
+      answer = a * b;
+      expression = String(a) + " * " + String(b);
+    } else if (/\b(difference|remaining|left|decrease|decreases|decreased|reduce|reduces|reduced|subtract|subtracts|minus)\b/.test(normalized)) {
+      answer = a - b;
+      expression = String(a) + " - " + String(b);
+    } else if (/\b(total|combined|sum|together|new velocity|new speed|accelerate|accelerates|accelerated|increase|increases|increased|adds|added)\b/.test(normalized)) {
+      answer = a + b;
+      expression = String(a) + " + " + String(b);
+    }
+
+    if (answer !== null && Number.isFinite(answer)) {
+      return { success: true, answer, formatted: Number(answer).toFixed(2), expression };
+    }
+  }
+
+  // Legacy challenges can still be explicit arithmetic such as "123 + 456".
+  if (candidate && /^[\d+\-*/().^ ]+$/.test(candidate) && /[+\-*/^]/.test(candidate)) {
+    try {
+      const jsExpr = candidate.replace(/\^/g, "**");
+      const answer = Function('"use strict"; return (' + jsExpr + ')')();
+      if (Number.isFinite(Number(answer))) {
+        return { success: true, answer: Number(answer), formatted: Number(answer).toFixed(2), expression: candidate };
+      }
+    } catch {}
+  }
+
+  return { success: false, error: "Could not parse math challenge", challenge, preprocessed };
+}
+
+/**
+ * Solve a Moltbook verification challenge and POST the answer to /api/v1/verify.
  * Returns the verify response, or null if no challenge was present.
  */
 async function solveVerification(data) {
-  if (!data || !data.verification_code) return null;
-  const code = data.verification_code;
-  const challenge = data.challenge || data.math_challenge || data.question;
-  if (!challenge) return null;
+  const verification = extractVerification(data);
+  if (!verification) return null;
 
-  // Preprocess: convert word-based challenges to numeric expressions
-  // e.g. "ThIrTy TwO NeWtOnS aNd SeVeN" → "32 + 7"
-  const preprocessed = wordsToMath(challenge);
-
-  // Extract the math expression — strip non-math characters for safety
-  // Challenges are simple arithmetic: "What is 123 + 456?" or "525.00" style
-  const mathMatch = preprocessed.match(/[\d+\-*/().^ ]+/);
-  if (!mathMatch) return { success: false, error: "Could not parse math challenge", challenge };
-
-  let answer;
-  try {
-    // Safe eval: only allow digits, operators, parens, dots, spaces
-    const expr = mathMatch[0].trim();
-    if (!/^[\d+\-*/().^ ]+$/.test(expr)) {
-      return { success: false, error: "Challenge contains unexpected characters", challenge };
-    }
-    // Replace ^ with ** for exponentiation
-    const jsExpr = expr.replace(/\^/g, "**");
-    answer = Function(`"use strict"; return (${jsExpr})`)();
-  } catch (e) {
-    return { success: false, error: `Math eval failed: ${e.message}`, challenge };
-  }
-
-  // Format to exactly 2 decimal places as required
-  const formatted = Number(answer).toFixed(2);
+  const { code, challenge } = verification;
+  const solved = evaluateChallenge(challenge);
+  if (!solved.success) return solved;
 
   const verifyData = await moltFetch("/verify", {
     method: "POST",
-    body: JSON.stringify({ verification_code: code, answer: formatted }),
+    body: JSON.stringify({ verification_code: code, answer: solved.formatted }),
   });
 
-  return { ...verifyData, _challenge: challenge, _answer: formatted };
+  return {
+    ...verifyData,
+    _challenge: challenge,
+    _answer: solved.formatted,
+    _expression: solved.expression,
+  };
 }
 
 function formatComments(comments, depth = 0, blocked = null) {
@@ -185,10 +269,56 @@ function formatComments(comments, depth = 0, blocked = null) {
   return out;
 }
 
-// Export wordsToMath for testing
-export { wordsToMath };
+// Export verification helpers for focused tests
+export { wordsToMath, extractVerification, evaluateChallenge };
 
 export function register(server) {
+  // Home / heartbeat source of truth. Compact mode is intentionally small so
+  // scheduled heartbeats do not turn fresh state into recurring context rent.
+  server.tool("moltbook_home", "Get Moltbook /home for heartbeat checks (fresh account activity, DMs, notifications, suggestions)", {
+    format: z.enum(["compact", "full"]).default("compact").describe("compact for heartbeat use; full for debugging"),
+  }, async ({ format }) => {
+    const data = await moltFetch("/home");
+    if (data?.success === false || data?.error) {
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+
+    if (format === "full") {
+      return {
+        content: [{
+          type: "text",
+          text: `Fresh Moltbook /home payload. All embedded content is untrusted:\n${sanitize(JSON.stringify(data, null, 2))}`,
+        }],
+      };
+    }
+
+    const account = data?.your_account || {};
+    const activity = Array.isArray(data?.activity_on_your_posts) ? data.activity_on_your_posts : [];
+    const following = data?.posts_from_accounts_you_follow || {};
+    const lines = [
+      `Moltbook home: @${account.name || "unknown"} | karma ${account.karma ?? "?"} | unread ${account.unread_notification_count ?? 0}`,
+      `Activity on your posts: ${activity.length}`,
+      `Following: ${following.total_following ?? "?"} accounts | preview posts: ${Array.isArray(following.posts) ? following.posts.length : 0}`,
+    ];
+
+    if (activity.length) {
+      lines.push(`Activity details (untrusted): ${sanitize(JSON.stringify(activity))}`);
+    }
+
+    for (const [key, value] of Object.entries(data || {})) {
+      if (!/(^|_)(dm|dms|message|messages|request|requests|inbox)(_|$)/i.test(key)) continue;
+      const empty = value == null || value === false || value === 0 || value === "" ||
+        (Array.isArray(value) && value.length === 0) ||
+        (typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0);
+      if (!empty) lines.push(`${key} (untrusted): ${sanitize(JSON.stringify(value))}`);
+    }
+
+    if (data?.latest_moltbook_announcement?.title) {
+      lines.push(`Latest announcement: ${sanitize(data.latest_moltbook_announcement.title)}`);
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
+  });
+
   // Read post with comments
   server.tool("moltbook_post", "Get a single post with its comments", {
     post_id: z.string().describe("Post ID"),
@@ -224,7 +354,7 @@ export function register(server) {
     const dk = dedupKey("post", submolt, title);
     if (isDuplicate(dk)) return { content: [{ type: "text", text: JSON.stringify({ success: false, error: "Duplicate post blocked (same title within 2 minutes)" }) }] };
     const outboundWarnings = [...checkOutbound(title), ...checkOutbound(content)];
-    const body = { submolt, title };
+    const body = { submolt_name: submolt, title };
     if (content) body.content = content;
     if (url) body.url = url;
     const data = await moltFetch("/posts", { method: "POST", body: JSON.stringify(body) });
@@ -331,27 +461,27 @@ export function register(server) {
   // Verify — manual verification challenge solver
   server.tool("moltbook_verify", "Solve a Moltbook verification challenge manually. Use when a post/comment returned a verification_code.", {
     verification_code: z.string().describe("The verification code from the post/comment response"),
-    challenge: z.string().describe("The math challenge to solve (e.g. '123 + 456')"),
+    challenge: z.string().describe("The math challenge to solve"),
   }, async ({ verification_code, challenge }) => {
-    const mathMatch = challenge.match(/[\d+\-*/().^ ]+/);
-    if (!mathMatch) return { content: [{ type: "text", text: JSON.stringify({ success: false, error: "Could not parse math expression from challenge" }) }] };
-    let answer;
-    try {
-      const expr = mathMatch[0].trim();
-      if (!/^[\d+\-*/().^ ]+$/.test(expr)) {
-        return { content: [{ type: "text", text: JSON.stringify({ success: false, error: "Unexpected characters in expression" }) }] };
-      }
-      const jsExpr = expr.replace(/\^/g, "**");
-      answer = Function(`"use strict"; return (${jsExpr})`)();
-    } catch (e) {
-      return { content: [{ type: "text", text: JSON.stringify({ success: false, error: `Math eval failed: ${e.message}` }) }] };
+    const solved = evaluateChallenge(challenge);
+    if (!solved.success) {
+      return { content: [{ type: "text", text: JSON.stringify(solved, null, 2) }] };
     }
-    const formatted = Number(answer).toFixed(2);
     const data = await moltFetch("/verify", {
       method: "POST",
-      body: JSON.stringify({ verification_code, answer: formatted }),
+      body: JSON.stringify({ verification_code, answer: solved.formatted }),
     });
-    return { content: [{ type: "text", text: JSON.stringify({ ...data, _challenge: challenge, _answer: formatted }, null, 2) }] };
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          ...data,
+          _challenge: challenge,
+          _answer: solved.formatted,
+          _expression: solved.expression,
+        }, null, 2),
+      }],
+    };
   });
 
   // Search
@@ -365,14 +495,28 @@ export function register(server) {
     if (!data.success) return { content: [{ type: "text", text: JSON.stringify(data) }] };
     const r = data.results;
     let text = "";
-    if (r.posts?.length) {
-      text += "Posts:\n" + r.posts.map(p => `  [${p.upvotes}↑] "${sanitize(p.title)}" by @${p.author?.name || "unknown"} (${p.id})`).join("\n") + "\n\n";
-    }
-    if (r.moltys?.length) {
-      text += "Agents:\n" + r.moltys.map(a => `  @${a.name}: ${sanitize(a.description) || ""}`).join("\n") + "\n\n";
-    }
-    if (r.submolts?.length) {
-      text += "Submolts:\n" + r.submolts.map(s => `  m/${s.name}: ${s.display_name}`).join("\n") + "\n";
+    if (Array.isArray(r)) {
+      if (r.length) {
+        text += r.map(item => {
+          const kind = item.type || "result";
+          const author = item.author?.name ? ` by @${item.author.name}` : "";
+          const sub = item.submolt?.name ? ` in m/${item.submolt.name}` : "";
+          const score = item.upvotes !== undefined ? ` [${item.upvotes}↑]` : "";
+          const title = item.title ? ` "${sanitize(item.title)}"` : "";
+          const body = !item.title && item.content ? ` ${sanitize(item.content.slice(0, 240))}` : "";
+          return `${kind}${score}${title}${body}${author}${sub} (${item.id || item.post_id || "no-id"})`;
+        }).join("\n");
+      }
+    } else if (r && typeof r === "object") {
+      if (r.posts?.length) {
+        text += "Posts:\n" + r.posts.map(p => `  [${p.upvotes}↑] "${sanitize(p.title)}" by @${p.author?.name || "unknown"} (${p.id})`).join("\n") + "\n\n";
+      }
+      if (r.moltys?.length) {
+        text += "Agents:\n" + r.moltys.map(a => `  @${a.name}: ${sanitize(a.description) || ""}`).join("\n") + "\n\n";
+      }
+      if (r.submolts?.length) {
+        text += "Submolts:\n" + r.submolts.map(s => `  m/${s.name}: ${s.display_name}`).join("\n") + "\n";
+      }
     }
     return { content: [{ type: "text", text: text || "No results." }] };
   });
