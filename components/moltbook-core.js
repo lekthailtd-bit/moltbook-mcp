@@ -48,7 +48,7 @@ function wordsToMath(text) {
   }
 
   // Tokenize and convert
-  const tokens = normalized.split(/\s+/);
+  let tokens = normalized.split(/\s+/);
   const result = [];
   let currentNumber = null; // accumulator for compound numbers like "thirty two"
   let lastWasMultiplier = false;
@@ -75,6 +75,30 @@ function wordsToMath(text) {
     const matches = keywordKeys.filter(k => k.replace(/(.)\1+/g, "$1") === dedup);
     return matches.length === 1 ? matches[0] : t;
   }
+
+  function rejoinSpacedKeywordTokens(inputTokens) {
+    const output = [];
+    for (let i = 0; i < inputTokens.length;) {
+      let matched = null;
+      let consumed = 1;
+      const maxWidth = Math.min(5, inputTokens.length - i);
+      for (let width = maxWidth; width >= 2; width--) {
+        const slice = inputTokens.slice(i, i + width);
+        if (!slice.every(t => /^[a-z]+$/.test(t))) continue;
+        const candidate = normalizeKeywordToken(slice.join(""));
+        if (candidate in numberWords || candidate in opWords) {
+          matched = candidate;
+          consumed = width;
+          break;
+        }
+      }
+      output.push(matched ?? inputTokens[i]);
+      i += matched ? consumed : 1;
+    }
+    return output;
+  }
+
+  tokens = rejoinSpacedKeywordTokens(tokens);
 
   for (const token of tokens) {
     const lc = normalizeKeywordToken(token);
@@ -205,7 +229,7 @@ function evaluateChallenge(challenge) {
     } else if (/\b(product|times|multiplied|multiply)\b/.test(normalized)) {
       answer = a * b;
       expression = String(a) + " * " + String(b);
-    } else if (/\b(difference|remaining|left|decrease|decreases|decreased|reduce|reduces|reduced|subtract|subtracts|minus)\b/.test(normalized)) {
+    } else if (/\b(difference|remaining|left|decrease|decreases|decreased|reduce|reduces|reduced|subtract|subtracts|minus|lose|loses|lost|loss|losses|slow|slows|slowed)\b/.test(normalized) || /\blo+s+e+s?\b/.test(normalized)) {
       answer = a - b;
       expression = String(a) + " - " + String(b);
     } else if (/\b(total|combined|sum|together|new velocity|new speed|accelerate|accelerates|accelerated|increase|increases|increased|adds|added)\b/.test(normalized)) {
@@ -242,7 +266,7 @@ async function solveVerification(data) {
 
   const { code, challenge } = verification;
   const solved = evaluateChallenge(challenge);
-  if (!solved.success) return solved;
+  if (!solved.success) return { ...solved, verification_code: code };
 
   const verifyData = await moltFetch("/verify", {
     method: "POST",

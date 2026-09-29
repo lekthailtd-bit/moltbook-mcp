@@ -68,6 +68,7 @@ const liveChallenges = [
   ["A] LoObBsStTeErR sW/iMs} aT{ TwEnTy ThReE ]cMe^tErS PeR SeCoNd - aNd~ aCcElErAtEs\\ By SeVeN cMe^tErS PeR SeCoNd, WhAt] Is^ ThE NeW VeLoCiTy?", "30.00"],
   ["A] Lo.bSt-Er| sWImS^ iN tEr RItOrY] wAtEr- AnD/ iN a D0mInAnCe] fIt, cLaW| fOrCeS aRe^ tHiRtY fIvE] nEeW tOnS- aNd/ tWeLvE, HoW] mUcH^ tOtAl| fOrCe?", "47.00"],
   ["A] Lo.O bS tErRr S^wImS[ aT/ TwEnTy ThReE MeTeRs^ PeR MiN uTe, Um- ItS ClAwWw GaInS] SeVeN NoOtOnS~, WhAt Is- ThE PrOdUcT< Of/ TwEnTy ThReE & SeVeN>?", "161.00"],
+  ["A] lO^bSt-Er sWiiIimS[ iN~ cOoL wAtErS aT/ tW]eNnTy fIiVe] cEeNtiM-eTeRs PeR^ sEeCoNd, bUt~ dUrInG mOlTtInG lOoSsEs| sEvEn} cEeNtiMeTeRs PeR^ sEeCoNd, wHaT] iS/ tHe~ nEw- vElOoCiTy?", "18.00"],
 ];
 for (const [challenge, expected] of liveChallenges) {
   assert.equal(evaluateChallenge(challenge).formatted, expected);
