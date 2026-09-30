@@ -1,8 +1,13 @@
 import { z } from 'zod';
-import { getCommentWriteCoordinator } from '../providers/comment-writes.js';
+import { createCommentWriteCoordinator } from '../providers/comment-writes.js';
+import { createDurableCommentWriteStore } from '../providers/durable-comment-write-store.js';
 import { loadState, saveState } from '../providers/state.js';
 import { logAction } from '../providers/api.js';
 import { checkOutbound, dedupKey, markDedup, MAX_COMMENT_LEN } from '../transforms/security.js';
+
+const commentWriteCoordinator = createCommentWriteCoordinator({
+  store: createDurableCommentWriteStore(),
+});
 
 function textResult(payload, warnings = []) {
   let text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
@@ -68,7 +73,7 @@ export function registerCommentWriteTools(server) {
     if (content && content.length > MAX_COMMENT_LEN) content = content.slice(0, MAX_COMMENT_LEN) + '\n\n[truncated]';
     const input = { post_id, content, parent_id: parent_id || null, idempotency_key: idempotency_key || null };
     const warnings = checkOutbound(content);
-    const result = await getCommentWriteCoordinator().submit(input);
+    const result = await commentWriteCoordinator.submit(input);
     if (result.success) recordPublished(input, result);
     const queued = result.state === 'creation_rejected' ? enqueueRejected(input, result) : false;
     return textResult({
@@ -82,7 +87,7 @@ export function registerCommentWriteTools(server) {
     verification_code: z.string().describe('The verification code from the post/comment response'),
     challenge: z.string().describe('The math challenge to solve'),
   }, async ({ verification_code, challenge }) => {
-    const result = await getCommentWriteCoordinator().verify({ verification_code, challenge });
+    const result = await commentWriteCoordinator.verify({ verification_code, challenge });
     return textResult({
       ...result,
       ...(result.success ? {} : { caller_guidance: 'Verification failure is not proof that the original write failed. Do not recreate it; reconcile/retry this verification flow.' }),
@@ -118,7 +123,6 @@ export function registerPendingTool(server) {
     const notEligible = isAuto ? pending.filter(pc => pc.nextRetryAfter && new Date(pc.nextRetryAfter).getTime() > now) : [];
     if (!eligible.length) return textResult(`⏳ ${pending.length} pending comment(s), none eligible yet.`);
 
-    const coordinator = getCommentWriteCoordinator();
     const remaining = [...notEligible];
     const lines = [];
     for (const pc of eligible) {
@@ -129,7 +133,7 @@ export function registerPendingTool(server) {
         lines.push(`⏸️ ${pc.post_id.slice(0, 8)}: retry limit reached; retained for reconciliation/manual review`);
         continue;
       }
-      const result = await coordinator.retryPending(pc);
+      const result = await commentWriteCoordinator.retryPending(pc);
       const input = { post_id: pc.post_id, parent_id: pc.parent_id || null, content: pc.content, idempotency_key: pc.idempotency_key || null };
       if (result.success) {
         recordPublished(input, result, result.reconciled ? 'pending-reconciled' : 'pending-retry');
