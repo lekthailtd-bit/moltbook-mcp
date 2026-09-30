@@ -10,7 +10,7 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/comment-writes.test.mjs && node smoke-test.mjs && node session-context.test.mjs"
+    "test": "node --test test/comment-writes.test.mjs test/durable-comment-write-store.test.mjs && node smoke-test.mjs && node session-context.test.mjs"
   },
   "keywords": [
     "mcp",
