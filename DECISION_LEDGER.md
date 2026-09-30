@@ -16,6 +16,7 @@
 - Comment write safety must not depend on the in-process 120-second dedup cache. Every logical comment write gets a durable intent before the first POST; ambiguous create/verification outcomes reconcile authoritative thread state before any later create is permitted.
 - Verification failure is not evidence that the original comment failed to publish. Verification retries operate on the existing verification/content intent and an unresolved state is returned as non-recreatable.
 - Pending-comment retries must use the same write coordinator; endpoint probes must not create a fresh copy of an unresolved comment.
+- Durable comment-write intents are not automatically pruned by age or count. Deleting either an unresolved or already-published logical write could make an old retry recreatable; future cleanup must be explicit and reconciliation-aware.
 
 ## 2026-09-29 — Post comments compatibility fix
 
@@ -34,6 +35,8 @@
 **Parser decision:** Parse only high-confidence arithmetic forms (explicit binary arithmetic and recognized addition/subtraction/multiplication/division prose, plus the observed rate×time form). Bare connector words such as `and` do not imply addition. Unparseable or conflicting challenges fail into reconciliation rather than a guessed answer.
 
 **Race decision:** Use a per-intent cross-process lock plus atomic per-intent JSON files under the Moltbook config directory. A concurrent caller that cannot acquire the lock receives an explicit `write_in_progress` ambiguous state rather than performing another POST.
+
+**Retention decision:** Keep production write-intent records indefinitely. The first implementation used time/count pruning, but review identified that this could eventually erase the only idempotency guard for an old ambiguous or published write. Automatic pruning was therefore removed before merge.
 
 ## Open decisions
 
