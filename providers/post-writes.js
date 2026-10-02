@@ -11,6 +11,12 @@ function hash(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+function isTerminalVerificationFailure(data) {
+  if (!data || data.success !== false) return false;
+  const message = `${data.error || ''} ${data.message || ''}`.toLowerCase();
+  return /incorrect answer|wrong answer|invalid answer|verification (?:failed|rejected|expired)|challenge (?:failed|rejected|expired)|expired challenge/.test(message);
+}
+
 export function postWriteKey({ submolt, title, content = '', url = '', idempotency_key = null }) {
   return hash([
     'post-v1',
@@ -102,7 +108,9 @@ export function createPostWriteCoordinator({
     }
     if (result.state === 'verification_pending') {
       persist(intent, {
-        status: intent.status === 'abstained' ? 'abstained' : 'verification_pending',
+        status: ['abstained', 'verification_rejected'].includes(intent.status)
+          ? intent.status
+          : 'verification_pending',
         verification_status: 'pending',
         last_reconciliation: result,
         last_reconciled_at: new Date(now()).toISOString(),
@@ -241,6 +249,9 @@ export function createPostWriteCoordinator({
       const intent = store.load(linked.key) || linked;
       if (intent.status === 'published') return makeResult(intent, { already_published: true });
       if (intent.status === 'abstained') return makeResult(intent, { reason: 'verification_abstained' });
+      if (intent.status === 'verification_rejected') {
+        return makeResult(intent, { reason: intent.last_error || 'verification_rejected' });
+      }
 
       const effectiveChallenge = challenge || intent.challenge || null;
       if (typeof answer === 'string' && answer.trim().toUpperCase() === 'ABSTAIN') {
@@ -289,10 +300,13 @@ export function createPostWriteCoordinator({
         source: answerSource,
         response: verifyData,
       }];
+      const terminalFailure = isTerminalVerificationFailure(verifyData);
       persist(intent, {
         challenge: effectiveChallenge,
         verification_attempts: attempts,
-        status: verifyData?.success ? 'verification_succeeded_pending_reconciliation' : 'verification_pending',
+        status: verifyData?.success
+          ? 'verification_succeeded_pending_reconciliation'
+          : terminalFailure ? 'verification_rejected' : 'verification_pending',
         last_error: verifyData?.success ? null : (verifyData?.error || 'Verification did not report success'),
       });
 

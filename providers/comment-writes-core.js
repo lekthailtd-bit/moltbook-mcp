@@ -366,6 +366,12 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
     return { success: false, state: result.state, reason: result.reason, write_key: intent.key, safe_to_recreate: false };
   }
 
+  function isTerminalVerificationFailure(data) {
+    if (!data || data.success !== false) return false;
+    const message = `${data.error || ''} ${data.message || ''}`.toLowerCase();
+    return /incorrect answer|wrong answer|invalid answer|verification (?:failed|rejected|expired)|challenge (?:failed|rejected|expired)|expired challenge/.test(message);
+  }
+
   async function attemptVerification(intent, challenge, explicit = false, suppliedAnswer = null) {
     let parsed;
     const direct = suppliedAnswer == null ? '' : String(suppliedAnswer).trim();
@@ -397,10 +403,13 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
       response: verifyData,
     }];
     const stable = extractStableIds(verifyData);
+    const terminalFailure = isTerminalVerificationFailure(verifyData);
     persist(intent, {
       verification_attempts: attempts,
       stable_ids: [...new Set([...(intent.stable_ids || []), ...stable])],
-      status: verifyData?.success ? 'verification_succeeded' : 'verification_pending',
+      status: verifyData?.success
+        ? 'verification_succeeded'
+        : terminalFailure ? 'verification_rejected' : 'verification_pending',
       last_error: verifyData?.success ? null : (verifyData?.error || 'Verification did not report success'),
     });
     if (verifyData?.success && verifyData?.comment) publish(intent, verifyData.comment, 'verify_response');
@@ -564,7 +573,9 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
       });
       return {
         ...data,
-        state: data?.success ? 'verification_succeeded_unlinked' : 'verification_ambiguous_unlinked',
+        state: data?.success
+          ? 'verification_succeeded_unlinked'
+          : isTerminalVerificationFailure(data) ? 'verification_rejected_unlinked' : 'verification_ambiguous_unlinked',
         linked_write: false,
         _challenge: challenge,
         _answer: parsed.formatted,
@@ -580,6 +591,9 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
       const intent = store.load(linked.key) || linked;
       if (intent.status === 'published') return makeResult(intent, { already_published: true });
       if (intent.status === 'abstained') return makeResult(intent, { state: 'abstained', reason: 'verification_abstained' });
+      if (intent.status === 'verification_rejected') {
+        return makeResult(intent, { state: 'verification_rejected', reason: intent.last_error || 'verification_rejected' });
+      }
       if (typeof answer === 'string' && answer.trim().toUpperCase() === 'ABSTAIN') {
         persist(intent, {
           status: 'abstained',
@@ -600,7 +614,9 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
       }
       return {
         success: false,
-        state: intent.status === 'verification_unparseable' ? 'verification_unparseable' : 'verification_pending',
+        state: intent.status === 'verification_unparseable'
+          ? 'verification_unparseable'
+          : intent.status === 'verification_rejected' ? 'verification_rejected' : 'verification_pending',
         reason: intent.last_error || reconciled.reason,
         write_key: intent.key,
         verification_code,
