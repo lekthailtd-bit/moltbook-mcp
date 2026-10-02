@@ -128,6 +128,24 @@ test('normal comment requiring verification succeeds and publishes once', async 
   assert.equal(api.comments.get('post-1').length, 1);
 });
 
+test('agent-owned comment verification returns raw challenge and accepts explicit answer', async () => {
+  const api = fakeMoltbook({ verification: true, challenge: 'mysterious phrasing', expectedAnswer: '56.00' });
+  const c = createCommentWriteCoordinator({ request: api.request, store: createMemoryStore() });
+  const pending = await c.submit(baseInput, { auto_verify: false });
+  assert.equal(pending.success, false);
+  assert.equal(pending.state, 'verification_pending');
+  assert.equal(pending.challenge, 'mysterious phrasing');
+  assert.equal(api.verifyCount, 0);
+  const result = await c.verify({
+    verification_code: pending.verification_code,
+    challenge: pending.challenge,
+    answer: '56.00',
+  });
+  assert.equal(result.success, true);
+  assert.equal(api.verifyCount, 1);
+  assert.equal(api.comments.get('post-1').length, 1);
+});
+
 test('verification reports failure but already-published comment reconciles as success', async () => {
   const api = fakeMoltbook({ verification: true, publishBeforeVerify: true, verifyFails: true });
   const c = createCommentWriteCoordinator({ request: api.request, store: createMemoryStore() });
@@ -159,7 +177,7 @@ test('ambiguous create/verify result reconciles on retry without second create',
   const c = createCommentWriteCoordinator({ request: api.request, store });
   const first = await c.submit(baseInput);
   assert.equal(first.success, false);
-  assert.equal(first.state, 'ambiguous');
+  assert.equal(first.state, 'verification_pending');
   const second = await c.submit(baseInput);
   assert.equal(second.success, true);
   assert.equal(second.reconciled, true);
