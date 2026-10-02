@@ -66,6 +66,7 @@ function fakeMoltbook(options = {}) {
       if (options.verifyFails) return { success: false, error: 'Incorrect answer' };
       if (!pending) return { success: false, error: 'Unknown verification code' };
       if (body.answer !== (options.expectedAnswer || '56.00')) return { success: false, error: 'Incorrect answer' };
+      if (options.verifySuccessWithoutPublish) return { success: true };
       publish(pending.postId, pending.comment);
       return { success: true, comment: pending.comment };
     }
@@ -75,6 +76,11 @@ function fakeMoltbook(options = {}) {
   return {
     request,
     comments,
+    publishPending(verificationCode) {
+      const pending = pendingByCode.get(verificationCode);
+      if (!pending) throw new Error(`Unknown verification code: ${verificationCode}`);
+      publish(pending.postId, pending.comment);
+    },
     get createCount() { return createCount; },
     get verifyCount() { return verifyCount; },
   };
@@ -144,6 +150,31 @@ test('agent-owned comment verification returns raw challenge and accepts explici
   assert.equal(result.success, true);
   assert.equal(api.verifyCount, 1);
   assert.equal(api.comments.get('post-1').length, 1);
+});
+
+test('accepted comment verification is spent during publication lag and later reconciles without resubmission', async () => {
+  const api = fakeMoltbook({ verification: true, verifySuccessWithoutPublish: true });
+  const c = createCommentWriteCoordinator({ request: api.request, store: createMemoryStore() });
+  const pending = await c.submit(baseInput, { auto_verify: false });
+
+  const accepted = await c.verify({ verification_code: pending.verification_code, answer: '56.00' });
+  assert.equal(accepted.success, false);
+  assert.equal(accepted.state, 'verification_succeeded_pending_reconciliation');
+  assert.equal(accepted.verification_accepted, true);
+  assert.equal(api.verifyCount, 1);
+
+  const secondVerify = await c.verify({ verification_code: pending.verification_code, answer: '999.00' });
+  assert.equal(secondVerify.success, false);
+  assert.equal(secondVerify.state, 'verification_succeeded_pending_reconciliation');
+  assert.equal(secondVerify.verification_accepted, true);
+  assert.equal(api.verifyCount, 1, 'accepted answer must never be resubmitted while publication lags');
+
+  api.publishPending(pending.verification_code);
+  const reconciled = await c.submit(baseInput, { auto_verify: false });
+  assert.equal(reconciled.success, true);
+  assert.equal(reconciled.already_published, true);
+  assert.equal(api.verifyCount, 1);
+  assert.equal(api.createCount, 1);
 });
 
 test('incorrect comment verification is terminal and cannot be retried with another answer', async () => {

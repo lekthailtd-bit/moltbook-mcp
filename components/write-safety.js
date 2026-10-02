@@ -100,7 +100,11 @@ export function registerCommentWriteTools(server) {
       ...(result.success ? {} : {
         caller_guidance: result.state === 'abstained'
           ? 'Verification was explicitly abstained. The durable write intent remains queryable and will not be recreated automatically.'
-          : 'Verification failure is not proof that the original write failed. Do not recreate it; reconcile/retry this verification flow against the same durable intent.',
+          : result.state === 'verification_rejected'
+            ? 'The provider rejected this verification. Do not submit another answer for this intent. Start a new intentional write only if a new post/comment is still wanted.'
+            : result.state === 'verification_succeeded_pending_reconciliation'
+              ? 'The provider accepted the verification. Do not resubmit the answer; reconcile the existing write intent until publication state catches up.'
+              : 'Verification failure is not proof that the original write failed. Do not recreate it; reconcile/retry this verification flow against the same durable intent.',
       }),
     });
   });

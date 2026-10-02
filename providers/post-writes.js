@@ -108,7 +108,7 @@ export function createPostWriteCoordinator({
     }
     if (result.state === 'verification_pending') {
       persist(intent, {
-        status: ['abstained', 'verification_rejected'].includes(intent.status)
+        status: ['abstained', 'verification_rejected', 'verification_succeeded_pending_reconciliation'].includes(intent.status)
           ? intent.status
           : 'verification_pending',
         verification_status: 'pending',
@@ -250,7 +250,21 @@ export function createPostWriteCoordinator({
       if (intent.status === 'published') return makeResult(intent, { already_published: true });
       if (intent.status === 'abstained') return makeResult(intent, { reason: 'verification_abstained' });
       if (intent.status === 'verification_rejected') {
-        return makeResult(intent, { reason: intent.last_error || 'verification_rejected' });
+        const reconciled = await reconcileAndPersist(intent);
+        if (reconciled.success) return reconciled;
+        return makeResult(intent, {
+          reason: intent.last_error || reconciled.reason || 'verification_rejected',
+          post: reconciled.post || null,
+        });
+      }
+      if (intent.status === 'verification_succeeded_pending_reconciliation') {
+        const reconciled = await reconcileAndPersist(intent);
+        if (reconciled.success) return { ...reconciled, verification_accepted: true };
+        return makeResult(intent, {
+          reason: reconciled.reason || 'verification_succeeded_pending_reconciliation',
+          post: reconciled.post || null,
+          verification_accepted: true,
+        });
       }
 
       const effectiveChallenge = challenge || intent.challenge || null;
@@ -323,6 +337,7 @@ export function createPostWriteCoordinator({
         reason: intent.last_error || reconciled.reason,
         post: reconciled.post || null,
         verification_error: verifyData?.success ? null : (verifyData?.error || verifyData?.message || null),
+        verification_accepted: verifyData?.success === true,
         _answer: submittedAnswer,
         _answer_source: answerSource,
       });
