@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { createCommentWriteCoordinator } from '../providers/comment-writes.js';
 import { createDurableCommentWriteStore } from '../providers/durable-comment-write-store.js';
+import { getPostWriteCoordinator } from '../providers/post-writes.js';
 import { loadState, saveState } from '../providers/state.js';
 import { logAction } from '../providers/api.js';
 import { checkOutbound, dedupKey, markDedup, MAX_COMMENT_LEN } from '../transforms/security.js';
@@ -8,6 +9,7 @@ import { checkOutbound, dedupKey, markDedup, MAX_COMMENT_LEN } from '../transfor
 const commentWriteCoordinator = createCommentWriteCoordinator({
   store: createDurableCommentWriteStore(),
 });
+const postWriteCoordinator = getPostWriteCoordinator();
 
 function textResult(payload, warnings = []) {
   let text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
@@ -73,7 +75,7 @@ export function registerCommentWriteTools(server) {
     if (content && content.length > MAX_COMMENT_LEN) content = content.slice(0, MAX_COMMENT_LEN) + '\n\n[truncated]';
     const input = { post_id, content, parent_id: parent_id || null, idempotency_key: idempotency_key || null };
     const warnings = checkOutbound(content);
-    const result = await commentWriteCoordinator.submit(input);
+    const result = await commentWriteCoordinator.submit(input, { auto_verify: false });
     if (result.success) recordPublished(input, result);
     const queued = result.state === 'creation_rejected' ? enqueueRejected(input, result) : false;
     return textResult({
@@ -83,14 +85,23 @@ export function registerCommentWriteTools(server) {
     }, warnings);
   });
 
-  server.tool('moltbook_verify', 'Solve a Moltbook verification challenge for the existing write intent and reconcile publication state', {
+  server.tool('moltbook_verify', 'Submit an agent-interpreted answer for an existing Moltbook verification intent and reconcile publication state. If answer is omitted, the legacy deterministic parser is used as a compatibility fallback. Use answer="ABSTAIN" to close a linked ambiguous intent without guessing.', {
     verification_code: z.string().describe('The verification code from the post/comment response'),
-    challenge: z.string().describe('The math challenge to solve'),
-  }, async ({ verification_code, challenge }) => {
-    const result = await commentWriteCoordinator.verify({ verification_code, challenge });
+    challenge: z.string().optional().describe('Raw challenge text. Optional for linked durable intents because the MCP already stores it.'),
+    answer: z.string().optional().describe('Agent-interpreted answer to submit. Prefer this over deterministic parsing. Use the literal ABSTAIN to decline an ambiguous one-shot challenge.'),
+  }, async ({ verification_code, challenge, answer }) => {
+    const input = { verification_code, challenge: challenge || null, answer: answer || null };
+    const postResult = await postWriteCoordinator.verify(input);
+    const result = postResult.linked_write === false
+      ? await commentWriteCoordinator.verify(input)
+      : postResult;
     return textResult({
       ...result,
-      ...(result.success ? {} : { caller_guidance: 'Verification failure is not proof that the original write failed. Do not recreate it; reconcile/retry this verification flow.' }),
+      ...(result.success ? {} : {
+        caller_guidance: result.state === 'abstained'
+          ? 'Verification was explicitly abstained. The durable write intent remains queryable and will not be recreated automatically.'
+          : 'Verification failure is not proof that the original write failed. Do not recreate it; reconcile/retry this verification flow against the same durable intent.',
+      }),
     });
   });
 }

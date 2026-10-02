@@ -366,11 +366,17 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
     return { success: false, state: result.state, reason: result.reason, write_key: intent.key, safe_to_recreate: false };
   }
 
-  async function attemptVerification(intent, challenge, explicit = false) {
-    const parsed = parseVerificationChallenge(challenge);
-    if (!parsed.success) {
-      persist(intent, { status: 'verification_unparseable', parser_error: parsed.error, challenge });
-      return { parsed, verifyData: null };
+  async function attemptVerification(intent, challenge, explicit = false, suppliedAnswer = null) {
+    let parsed;
+    const direct = suppliedAnswer == null ? '' : String(suppliedAnswer).trim();
+    if (direct) {
+      parsed = { success: true, formatted: direct, expression: 'agent_supplied' };
+    } else {
+      parsed = parseVerificationChallenge(challenge);
+      if (!parsed.success) {
+        persist(intent, { status: 'verification_unparseable', parser_error: parsed.error, challenge });
+        return { parsed, verifyData: null };
+      }
     }
     const prior = (intent.verification_attempts || []).find(a => a.answer === parsed.formatted);
     if (prior && !explicit) return { parsed, verifyData: prior.response || null, skipped: true };
@@ -384,13 +390,17 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
       verifyData = { success: false, error: `Verification request failed: ${err.message}` };
     }
     const attempts = [...(intent.verification_attempts || []), {
-      at: new Date(now()).toISOString(), answer: parsed.formatted, expression: parsed.expression, response: verifyData,
+      at: new Date(now()).toISOString(),
+      answer: parsed.formatted,
+      expression: parsed.expression,
+      source: direct ? 'agent' : 'compat_parser',
+      response: verifyData,
     }];
     const stable = extractStableIds(verifyData);
     persist(intent, {
       verification_attempts: attempts,
       stable_ids: [...new Set([...(intent.stable_ids || []), ...stable])],
-      status: verifyData?.success ? 'verification_succeeded' : 'verification_ambiguous',
+      status: verifyData?.success ? 'verification_succeeded' : 'verification_pending',
       last_error: verifyData?.success ? null : (verifyData?.error || 'Verification did not report success'),
     });
     if (verifyData?.success && verifyData?.comment) publish(intent, verifyData.comment, 'verify_response');
@@ -405,6 +415,7 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
     try {
       let intent = store.load(key);
       if (intent?.status === 'published') return makeResult(intent, { already_published: true });
+      if (intent?.status === 'abstained') return makeResult(intent, { state: 'abstained', reason: 'verification_abstained' });
 
       if (intent?.create_started_at) {
         const reconciled = await reconcileAndPersist(intent);
@@ -412,13 +423,24 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
 
         if (intent.verification_code) {
           const challenge = intent.challenge;
-          if (challenge) await attemptVerification(intent, challenge, false);
-          const afterVerify = await reconcileAndPersist(intent);
-          if (afterVerify.success) return afterVerify;
+          if (options.auto_verify !== false && challenge) {
+            await attemptVerification(intent, challenge, false);
+            const afterVerify = await reconcileAndPersist(intent);
+            if (afterVerify.success) return afterVerify;
+            return {
+              success: false,
+              state: intent.status === 'verification_unparseable' ? 'verification_unparseable' : 'verification_pending',
+              reason: intent.last_error || afterVerify.reason,
+              write_key: key,
+              verification_code: intent.verification_code,
+              challenge: intent.challenge,
+              safe_to_recreate: false,
+            };
+          }
           return {
             success: false,
-            state: intent.status === 'verification_unparseable' ? 'verification_unparseable' : 'ambiguous',
-            reason: intent.last_error || afterVerify.reason,
+            state: intent.status === 'verification_unparseable' ? 'verification_unparseable' : 'verification_pending',
+            reason: intent.last_error || reconciled.reason,
             write_key: key,
             verification_code: intent.verification_code,
             challenge: intent.challenge,
@@ -493,12 +515,14 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
 
       if (verification) {
         persist(intent, { status: 'verification_pending' });
-        if (verification.challenge && options.auto_verify !== false) await attemptVerification(intent, verification.challenge, false);
+        if (verification.challenge && options.auto_verify !== false) {
+          await attemptVerification(intent, verification.challenge, false);
+        }
         const reconciled = await reconcileAndPersist(intent);
         if (reconciled.success) return reconciled;
         return {
           success: false,
-          state: intent.status === 'verification_unparseable' ? 'verification_unparseable' : 'ambiguous',
+          state: intent.status === 'verification_unparseable' ? 'verification_unparseable' : 'verification_pending',
           reason: intent.last_error || reconciled.reason,
           write_key: key,
           verification_code: intent.verification_code,
@@ -527,15 +551,27 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
     }
   }
 
-  async function verify({ verification_code, challenge }) {
+  async function verify({ verification_code, challenge = null, answer = null }) {
     const linked = store.findByVerificationCode(verification_code);
     if (!linked) {
-      const parsed = parseVerificationChallenge(challenge);
+      const direct = answer == null ? '' : String(answer).trim();
+      let parsed;
+      if (direct) parsed = { success: true, formatted: direct, expression: 'agent_supplied' };
+      else parsed = parseVerificationChallenge(challenge);
       if (!parsed.success) return { ...parsed, success: false, state: 'verification_unparseable', linked_write: false, safe_to_recreate: false };
       const data = await request('/verify', {
         method: 'POST', body: JSON.stringify({ verification_code, answer: parsed.formatted }),
       });
-      return { ...data, state: data?.success ? 'verification_succeeded_unlinked' : 'verification_ambiguous_unlinked', linked_write: false, _challenge: challenge, _answer: parsed.formatted, _expression: parsed.expression, safe_to_recreate: false };
+      return {
+        ...data,
+        state: data?.success ? 'verification_succeeded_unlinked' : 'verification_ambiguous_unlinked',
+        linked_write: false,
+        _challenge: challenge,
+        _answer: parsed.formatted,
+        _answer_source: direct ? 'agent' : 'compat_parser',
+        _expression: parsed.expression,
+        safe_to_recreate: false,
+      };
     }
 
     const release = store.acquire(linked.key);
@@ -543,15 +579,34 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
     try {
       const intent = store.load(linked.key) || linked;
       if (intent.status === 'published') return makeResult(intent, { already_published: true });
-      await attemptVerification(intent, challenge || intent.challenge, true);
+      if (intent.status === 'abstained') return makeResult(intent, { state: 'abstained', reason: 'verification_abstained' });
+      if (typeof answer === 'string' && answer.trim().toUpperCase() === 'ABSTAIN') {
+        persist(intent, {
+          status: 'abstained',
+          abstained_at: new Date(now()).toISOString(),
+          abstention_reason: 'agent_abstained',
+        });
+        return makeResult(intent, { state: 'abstained', reason: 'verification_abstained' });
+      }
+      const effectiveChallenge = challenge || intent.challenge;
+      const attempted = await attemptVerification(intent, effectiveChallenge, true, answer);
       const reconciled = await reconcileAndPersist(intent);
-      if (reconciled.success) return reconciled;
+      if (reconciled.success) {
+        return {
+          ...reconciled,
+          _answer: attempted.parsed?.formatted || null,
+          _answer_source: answer == null ? 'compat_parser' : 'agent',
+        };
+      }
       return {
         success: false,
-        state: intent.status === 'verification_unparseable' ? 'verification_unparseable' : 'ambiguous',
+        state: intent.status === 'verification_unparseable' ? 'verification_unparseable' : 'verification_pending',
         reason: intent.last_error || reconciled.reason,
         write_key: intent.key,
         verification_code,
+        challenge: effectiveChallenge,
+        _answer: attempted.parsed?.formatted || null,
+        _answer_source: answer == null ? 'compat_parser' : 'agent',
         safe_to_recreate: false,
       };
     } finally { release(); }
@@ -565,6 +620,7 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
       idempotency_key: pending.idempotency_key || null,
     }, {
       reconcile_before_create: true,
+      auto_verify: false,
       first_attempt_at: pending.queued_at || pending.first_attempt_at || new Date(now()).toISOString(),
     });
   }
