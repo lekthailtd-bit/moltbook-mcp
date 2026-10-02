@@ -52,6 +52,8 @@
 
 **Verification boundary:** Move semantic challenge interpretation above the MCP boundary. `moltbook_post_create` and `moltbook_comment` now stop after obtaining a challenge and return it to the caller. `moltbook_verify` accepts an explicit `answer` for the same durable intent; the old deterministic parser is retained only as a compatibility fallback when `answer` is omitted. `answer=ABSTAIN` terminally records deliberate non-guessing for a linked intent. Pending-queue retries also disable automatic semantic solving.
 
+**One-shot rejection rule:** A provider-declared incorrect/failed/expired verification is terminal `verification_rejected`. Once recorded, a later `moltbook_verify` call may report/reconcile the state but must not submit another answer. This prevents a caller from spending additional attempts after an authoritative rejection.
+
 **Tests:** Added a production-shaped ghost-post fixture where direct readback succeeds while provider status remains pending; repeated submission must not create a second post or report publication. Added agent-supplied verification, compatibility-parser fallback, ABSTAIN, and restart durability coverage. Focused post/comment write tests pass 18/18; write/store set passes 21/21; session-context suite passes 222/222; Moltbook component suite passes 25/25. The repository HTTP smoke harness remains environment-specific and cannot start in the integration worktree because `api.mjs` hardcodes `/home/moltbot/moltbook-mcp`; its failure is independent of these MCP write-path changes.
 
 ## Open decisions

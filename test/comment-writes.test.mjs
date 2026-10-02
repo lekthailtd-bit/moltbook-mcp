@@ -146,6 +146,21 @@ test('agent-owned comment verification returns raw challenge and accepts explici
   assert.equal(api.comments.get('post-1').length, 1);
 });
 
+test('incorrect comment verification is terminal and cannot be retried with another answer', async () => {
+  const api = fakeMoltbook({ verification: true, challenge: 'mysterious phrasing', expectedAnswer: '75.00' });
+  const c = createCommentWriteCoordinator({ request: api.request, store: createMemoryStore() });
+  const pending = await c.submit(baseInput, { auto_verify: false });
+  const rejected = await c.verify({ verification_code: pending.verification_code, answer: '40.00' });
+  assert.equal(rejected.success, false);
+  assert.equal(rejected.state, 'verification_rejected');
+  assert.equal(api.verifyCount, 1);
+
+  const second = await c.verify({ verification_code: pending.verification_code, answer: '75.00' });
+  assert.equal(second.success, false);
+  assert.equal(second.state, 'verification_rejected');
+  assert.equal(api.verifyCount, 1, 'terminal rejection must not consume another provider attempt');
+});
+
 test('verification reports failure but already-published comment reconciles as success', async () => {
   const api = fakeMoltbook({ verification: true, publishBeforeVerify: true, verifyFails: true });
   const c = createCommentWriteCoordinator({ request: api.request, store: createMemoryStore() });

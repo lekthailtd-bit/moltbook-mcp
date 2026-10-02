@@ -58,6 +58,8 @@ function fakeMoltbook(options = {}) {
       if (!id) return { success: false, error: 'Unknown verification code' };
       if (options.verifyFails) return { success: false, error: 'Incorrect answer' };
       if (body.answer !== (options.expectedAnswer || '56.00')) {
+        const post = posts.get(id);
+        post.verification_status = 'failed';
         return { success: false, error: 'Incorrect answer' };
       }
       const post = posts.get(id);
@@ -147,6 +149,22 @@ test('compat parser is fallback only when no explicit answer is supplied', async
   assert.equal(verified.success, true);
   assert.equal(verified._answer_source, 'compat_parser');
   assert.equal(api.verifyCount, 1);
+});
+
+test('provider-rejected post verification is terminal and cannot spend a second attempt', async () => {
+  const api = fakeMoltbook({ verification: true, expectedAnswer: '75.00' });
+  const c = createPostWriteCoordinator({ request: api.request, store: createMemoryStore() });
+  const pending = await c.submit(input);
+  const rejected = await c.verify({ verification_code: pending.verification_code, answer: '40.00' });
+  assert.equal(rejected.success, false);
+  assert.equal(rejected.state, 'verification_rejected');
+  assert.equal(rejected.post.verification_status, 'failed');
+  assert.equal(api.verifyCount, 1);
+
+  const second = await c.verify({ verification_code: pending.verification_code, answer: '75.00' });
+  assert.equal(second.success, false);
+  assert.equal(second.state, 'verification_rejected');
+  assert.equal(api.verifyCount, 1, 'terminal rejection must not consume another provider attempt');
 });
 
 test('ABSTAIN is terminal for the durable post intent and never recreates', async () => {
