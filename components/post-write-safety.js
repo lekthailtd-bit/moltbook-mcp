@@ -47,9 +47,13 @@ export function registerPostWriteTool(server) {
       ...(result.success ? {} : {
         caller_guidance: result.state === 'verification_pending'
           ? 'Interpret the returned challenge and call moltbook_verify with this verification_code and an explicit answer. Do not recreate the post.'
-          : result.state === 'abstained'
-            ? 'This verification intent is explicitly abstained and will not be recreated automatically.'
-            : 'Do not recreate this post as a new write. Retry the same logical post so the MCP can reconcile its durable write intent.',
+          : result.state === 'verification_succeeded_pending_reconciliation'
+            ? 'The provider accepted verification. Do not resubmit the answer; retry this same logical post only to reconcile publication state.'
+            : result.state === 'verification_rejected'
+              ? 'The provider rejected verification. Do not retry the answer for this intent. Start a new intentional post only if another attempt is still wanted.'
+              : result.state === 'abstained'
+                ? 'This verification intent is explicitly abstained and will not be recreated automatically.'
+                : 'Do not recreate this post as a new write. Retry the same logical post so the MCP can reconcile its durable write intent.',
       }),
     }, warnings);
   });

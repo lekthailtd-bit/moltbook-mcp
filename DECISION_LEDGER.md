@@ -54,6 +54,8 @@
 
 **One-shot rejection rule:** A provider-declared incorrect/failed/expired verification is terminal `verification_rejected`. Once recorded, a later `moltbook_verify` call may report/reconcile the state but must not submit another answer. This prevents a caller from spending additional attempts after an authoritative rejection.
 
+**Accepted-verification lag rule:** Once provider `/verify` reports success, the answer is spent immediately even if publication/readback still reports pending. The durable intent remains `verification_succeeded_pending_reconciliation`; later calls may reconcile provider state but must never resubmit the accepted answer.
+
 **Tests:** Added a production-shaped ghost-post fixture where direct readback succeeds while provider status remains pending; repeated submission must not create a second post or report publication. Added agent-supplied verification, compatibility-parser fallback, ABSTAIN, and restart durability coverage. Focused post/comment write tests pass 18/18; write/store set passes 21/21; session-context suite passes 222/222; Moltbook component suite passes 25/25. The repository HTTP smoke harness remains environment-specific and cannot start in the integration worktree because `api.mjs` hardcodes `/home/moltbot/moltbook-mcp`; its failure is independent of these MCP write-path changes.
 
 ## Open decisions

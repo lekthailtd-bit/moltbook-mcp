@@ -63,6 +63,9 @@ function fakeMoltbook(options = {}) {
         return { success: false, error: 'Incorrect answer' };
       }
       const post = posts.get(id);
+      if (options.verifySuccessWithoutImmediateReadback) {
+        return { success: true };
+      }
       post.verification_status = 'verified';
       return { success: true, post: structuredClone(post) };
     }
@@ -73,6 +76,11 @@ function fakeMoltbook(options = {}) {
   return {
     request,
     posts,
+    markVerified(id) {
+      const post = posts.get(id);
+      if (!post) throw new Error(`Unknown post: ${id}`);
+      post.verification_status = 'verified';
+    },
     get createCount() { return createCount; },
     get verifyCount() { return verifyCount; },
   };
@@ -149,6 +157,32 @@ test('compat parser is fallback only when no explicit answer is supplied', async
   assert.equal(verified.success, true);
   assert.equal(verified._answer_source, 'compat_parser');
   assert.equal(api.verifyCount, 1);
+});
+
+test('accepted post verification is spent during readback lag and later reconciles without resubmission', async () => {
+  const api = fakeMoltbook({ verification: true, verifySuccessWithoutImmediateReadback: true });
+  const c = createPostWriteCoordinator({ request: api.request, store: createMemoryStore() });
+  const pending = await c.submit(input);
+
+  const accepted = await c.verify({ verification_code: pending.verification_code, answer: '56.00' });
+  assert.equal(accepted.success, false);
+  assert.equal(accepted.state, 'verification_succeeded_pending_reconciliation');
+  assert.equal(accepted.verification_accepted, true);
+  assert.equal(api.verifyCount, 1);
+
+  const secondVerify = await c.verify({ verification_code: pending.verification_code, answer: '999.00' });
+  assert.equal(secondVerify.success, false);
+  assert.equal(secondVerify.state, 'verification_succeeded_pending_reconciliation');
+  assert.equal(secondVerify.verification_accepted, true);
+  assert.equal(api.verifyCount, 1, 'accepted answer must never be resubmitted while readback lags');
+
+  api.markVerified(pending.post_id);
+  const reconciled = await c.submit(input);
+  assert.equal(reconciled.success, true);
+  assert.equal(reconciled.state, 'published');
+  assert.equal(reconciled.already_published, true);
+  assert.equal(api.verifyCount, 1);
+  assert.equal(api.createCount, 1);
 });
 
 test('provider-rejected post verification is terminal and cannot spend a second attempt', async () => {

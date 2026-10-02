@@ -408,7 +408,7 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
       verification_attempts: attempts,
       stable_ids: [...new Set([...(intent.stable_ids || []), ...stable])],
       status: verifyData?.success
-        ? 'verification_succeeded'
+        ? 'verification_succeeded_pending_reconciliation'
         : terminalFailure ? 'verification_rejected' : 'verification_pending',
       last_error: verifyData?.success ? null : (verifyData?.error || 'Verification did not report success'),
     });
@@ -425,6 +425,28 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
       let intent = store.load(key);
       if (intent?.status === 'published') return makeResult(intent, { already_published: true });
       if (intent?.status === 'abstained') return makeResult(intent, { state: 'abstained', reason: 'verification_abstained' });
+      if (intent?.status === 'verification_rejected') {
+        const reconciled = await reconcileAndPersist(intent);
+        if (reconciled.success) return reconciled;
+        return makeResult(intent, {
+          state: 'verification_rejected',
+          reason: intent.last_error || reconciled.reason || 'verification_rejected',
+        });
+      }
+      if (intent?.status === 'verification_succeeded_pending_reconciliation') {
+        const reconciled = await reconcileAndPersist(intent);
+        if (reconciled.success) return { ...reconciled, verification_accepted: true };
+        return {
+          success: false,
+          state: 'verification_succeeded_pending_reconciliation',
+          reason: reconciled.reason || 'verification_succeeded_pending_reconciliation',
+          write_key: key,
+          verification_code: intent.verification_code,
+          challenge: intent.challenge,
+          verification_accepted: true,
+          safe_to_recreate: false,
+        };
+      }
 
       if (intent?.create_started_at) {
         const reconciled = await reconcileAndPersist(intent);
@@ -592,7 +614,26 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
       if (intent.status === 'published') return makeResult(intent, { already_published: true });
       if (intent.status === 'abstained') return makeResult(intent, { state: 'abstained', reason: 'verification_abstained' });
       if (intent.status === 'verification_rejected') {
-        return makeResult(intent, { state: 'verification_rejected', reason: intent.last_error || 'verification_rejected' });
+        const reconciled = await reconcileAndPersist(intent);
+        if (reconciled.success) return reconciled;
+        return makeResult(intent, {
+          state: 'verification_rejected',
+          reason: intent.last_error || reconciled.reason || 'verification_rejected',
+        });
+      }
+      if (intent.status === 'verification_succeeded_pending_reconciliation') {
+        const reconciled = await reconcileAndPersist(intent);
+        if (reconciled.success) return { ...reconciled, verification_accepted: true };
+        return {
+          success: false,
+          state: 'verification_succeeded_pending_reconciliation',
+          reason: reconciled.reason || 'verification_succeeded_pending_reconciliation',
+          write_key: intent.key,
+          verification_code,
+          challenge: intent.challenge || challenge || null,
+          verification_accepted: true,
+          safe_to_recreate: false,
+        };
       }
       if (typeof answer === 'string' && answer.trim().toUpperCase() === 'ABSTAIN') {
         persist(intent, {
@@ -616,11 +657,16 @@ export function createCommentWriteCoordinator({ request = moltFetch, store = cre
         success: false,
         state: intent.status === 'verification_unparseable'
           ? 'verification_unparseable'
-          : intent.status === 'verification_rejected' ? 'verification_rejected' : 'verification_pending',
+          : intent.status === 'verification_rejected'
+            ? 'verification_rejected'
+            : intent.status === 'verification_succeeded_pending_reconciliation'
+              ? 'verification_succeeded_pending_reconciliation'
+              : 'verification_pending',
         reason: intent.last_error || reconciled.reason,
         write_key: intent.key,
         verification_code,
         challenge: effectiveChallenge,
+        verification_accepted: attempted.verifyData?.success === true,
         _answer: attempted.parsed?.formatted || null,
         _answer_source: answer == null ? 'compat_parser' : 'agent',
         safe_to_recreate: false,
