@@ -92,7 +92,7 @@ const input = {
   content: 'Bring specific operator-grade criticism.',
 };
 
-test('publication classification requires provider verified status', () => {
+test('only provider verification_status verified proves publication', () => {
   assert.deepEqual(
     classifyPostPublication({ id: 'p1', verification_status: 'verified', is_deleted: false }),
     { state: 'published', reason: 'verification_status_verified' },
@@ -100,6 +100,10 @@ test('publication classification requires provider verified status', () => {
   assert.deepEqual(
     classifyPostPublication({ id: 'p2', verification_status: 'pending', is_deleted: false }),
     { state: 'verification_pending', reason: 'verification_status_pending' },
+  );
+  assert.deepEqual(
+    classifyPostPublication({ id: 'p2', verification_status: 'unverified', is_deleted: false }),
+    { state: 'verification_pending', reason: 'verification_status_unverified' },
   );
   assert.equal(classifyPostPublication({ id: 'p3' }).state, 'unknown');
 });
@@ -122,6 +126,20 @@ test('ghost post readback stays pending and retry never creates a second post', 
   assert.notEqual(second.state, 'published');
   assert.equal(second.already_published, undefined);
   assert.equal(api.createCount, 1, 'HTTP-200 readback of a pending post must not authorize another create');
+});
+
+test('fetchable unverified post remains pending and is not recreated', async () => {
+  const api = fakeMoltbook({ verification: true });
+  const c = createPostWriteCoordinator({ request: api.request, store: createMemoryStore() });
+  const first = await c.submit(input);
+  api.posts.get(first.post_id).verification_status = 'unverified';
+
+  const reconciled = await c.submit(input);
+  assert.equal(reconciled.success, false);
+  assert.equal(reconciled.state, 'verification_pending');
+  assert.equal(reconciled.post.verification_status, 'unverified');
+  assert.equal(reconciled.already_published, undefined);
+  assert.equal(api.createCount, 1);
 });
 
 test('agent-supplied answer verifies the same durable post intent', async () => {
@@ -157,6 +175,25 @@ test('compat parser is fallback only when no explicit answer is supplied', async
   assert.equal(verified.success, true);
   assert.equal(verified._answer_source, 'compat_parser');
   assert.equal(api.verifyCount, 1);
+});
+
+test('unparseable challenge reconciles as pending and repeated retries reuse the same post', async () => {
+  const api = fakeMoltbook({ verification: true, challenge: 'A riddle without a reliable arithmetic answer' });
+  const c = createPostWriteCoordinator({ request: api.request, store: createMemoryStore() });
+  const pending = await c.submit(input);
+
+  const unparseable = await c.verify({ verification_code: pending.verification_code });
+  assert.equal(unparseable.success, false);
+  assert.equal(unparseable.state, 'verification_pending');
+  assert.equal(unparseable.post.verification_status, 'pending');
+  assert.ok(unparseable.parser);
+  assert.equal(api.verifyCount, 0, 'an unparseable challenge must not be submitted');
+
+  const retry = await c.submit(input);
+  assert.equal(retry.success, false);
+  assert.equal(retry.state, 'verification_pending');
+  assert.equal(retry.post_id, pending.post_id);
+  assert.equal(api.createCount, 1, 'retrying the pending logical post must not create a duplicate');
 });
 
 test('accepted post verification is spent during readback lag and later reconciles without resubmission', async () => {
