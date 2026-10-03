@@ -36,8 +36,8 @@ export function classifyPostPublication(post) {
   if (verificationStatus === 'verified') {
     return { state: 'published', reason: 'verification_status_verified' };
   }
-  if (verificationStatus === 'pending') {
-    return { state: 'verification_pending', reason: 'verification_status_pending' };
+  if (['pending', 'unverified'].includes(verificationStatus)) {
+    return { state: 'verification_pending', reason: `verification_status_${verificationStatus}` };
   }
   if (['rejected', 'failed', 'expired'].includes(verificationStatus)) {
     return { state: 'verification_rejected', reason: `verification_status_${verificationStatus}` };
@@ -111,7 +111,7 @@ export function createPostWriteCoordinator({
         status: ['abstained', 'verification_rejected', 'verification_succeeded_pending_reconciliation'].includes(intent.status)
           ? intent.status
           : 'verification_pending',
-        verification_status: 'pending',
+        verification_status: result.post?.verification_status || 'pending',
         last_reconciliation: result,
         last_reconciled_at: new Date(now()).toISOString(),
       });
@@ -284,14 +284,24 @@ export function createPostWriteCoordinator({
         parsed = parseVerificationChallenge(effectiveChallenge);
         if (!parsed.success) {
           persist(intent, {
-            status: 'verification_unparseable',
+            status: 'verification_pending',
             challenge: effectiveChallenge,
             parser_error: parsed.error,
           });
+          const reconciled = await reconcileAndPersist(intent);
+          if (reconciled.success) {
+            return makeResult(intent, {
+              ...reconciled,
+              challenge: effectiveChallenge,
+              parser: parsed,
+            });
+          }
           return makeResult(intent, {
             reason: parsed.error,
             challenge: effectiveChallenge,
             parser: parsed,
+            post: reconciled.post || null,
+            reconciled: Boolean(reconciled.post),
           });
         }
         submittedAnswer = parsed.formatted;
